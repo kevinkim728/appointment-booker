@@ -1,6 +1,10 @@
 import os
+import json
+import asyncio
+import websockets
 from dotenv import load_dotenv
 from twilio.rest import Client
+from datetime import datetime
 
 load_dotenv()
 
@@ -14,16 +18,16 @@ class TwilioRealtimeServer:
             os.getenv('TWILIO_AUTH_TOKEN')
         )
 
-    async def make_outbound_call(self, business_phone: str, user_context: dict):
+    async def make_outbound_call(self, business_phone: str, user_context: dict): # user_context: dict from the initiate_outbound_call that has all the CallDetails
         """Initiate an outbound call to a business"""
         try:
-            self.call_context = user_context       # user_context: dict from the initiate_outbound_call that has all the CallDetails
+            self.call_context = user_context
 
-            # Create the payload for Twilio
+            # Initiate the outbound call via Twilio, passing the webhook URL for when the call connects
             call = self.twilio_client.calls.create(
                 to=business_phone,
                 from_=os.getenv('TWILIO_PHONE_NUMBER'),
-                url=f"{os.getenv('WEBSOCKET_URL').replace('wss://', 'https://').replace('/media-stream', '')}/webhook/voice",  # Webhook for making the call
+                url=f"{os.getenv('WEBSOCKET_URL').replace('wss://', 'https://').replace('/media-stream', '')}/webhook/voice",  # Webhook for making the call.
                 method='POST',
                 record=True,
                 recording_channels='mono',
@@ -45,14 +49,14 @@ class TwilioRealtimeServer:
                 "error": str(e)
             }
 
-    async def handle_twilio_message(self, data, twilio_ws): # data: dict from Twilio. twilio_ws: FastAPI WebSocket object 
+    async def handle_twilio_message(self, data, twilio_ws): # data: dict from Twilio when audio is received. twilio_ws: FastAPI WebSocket object 
         """Process messages from Twilio"""
-        event = data.get('event')
+        event = data.get('event') # data['event'] includes a start, media, and stop
 
         if event == 'start':
             # stream just opened — connect to OpenAI and register this WebSocket so we can send audio back
             print("🎤 Call started - connecting to OpenAI")
-            await self.connect_to_openai() # Opens a WebSocket connection from this server to OpenAI
+            await self.connect_to_openai() # Initializes the OpenAI websocket
             self.twilio_connections[data.get('streamSid')] = twilio_ws # Stores the key streamSid and value twilio_ws(WebSocket object) into twilio_connections dict
 
         elif event == 'media':
@@ -70,3 +74,105 @@ class TwilioRealtimeServer:
             stream_sid = data.get('streamSid')
             if stream_sid in self.twilio_connections:
                 del self.twilio_connections[stream_sid]
+
+    async def connect_to_openai(self):
+        """Open a WebSocket connection to OpenAI Realtime API and configure the session"""
+        if self.openai_ws: # If theres something inside openai_ws then do nothing
+            return None
+
+        url = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17"
+        headers = {
+            "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
+            "OpenAI-Beta": "realtime=v1" 
+        }
+
+        try:
+            # Opens a connection to OpenAI
+            self.openai_ws = await websockets.connect(url, additional_headers=headers)  # Defines openai_ws as a websockets object connected to the openai websocket
+            print("✅ Connected to OpenAI Realtime API")
+
+            instructions = self.generate_prompt()
+            
+            # Creates the payload
+            session_update = {
+                "type": "session.update",
+                "session": {
+                    "instructions": instructions,  # system prompt — defines the AI's personality and task for this call
+                    "voice": "alloy",
+                    "input_audio_format": "g711_ulaw",       # matches Twilio's format so no conversion needed
+                    "output_audio_format": "g711_ulaw",
+                    "speed": 1.1,
+                    "temperature": 0.7,
+                    "turn_detection": {
+                        "type": "server_vad",                # OpenAI detects when the person stops talking and auto-responds
+                        "threshold": 0.7,                    # how sensitive the VAD is
+                        "silence_duration_ms": 1000          # how long to wait after silence before responding
+                    },
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "terminate_call",
+                            "description": "End the phone call",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "reason": {
+                                        "type": "string",
+                                        "description": "Reason for ending the call (e.g., 'appointment booked at 7pm', 'no availability', 'task complete')"
+                                    }
+                                },
+                                "required": ["reason"]
+                            }
+                        }
+                    ]
+                }
+            }
+
+            await self.openai_ws.send(json.dumps(session_update)) # Sends the payload to the openai websocket
+            asyncio.create_task(self.handle_openai_messages())  # start listening for OpenAI responses in the background
+
+        except Exception as e:
+            print(f"❌ Failed to connect to OpenAI: {e}")
+            self.openai_ws = None
+
+    def generate_prompt(self):
+        """Generate dynamic prompt based on user context"""
+        if not self.call_context:
+            return "You are an AI assistant for booking appointments. Help the user schedule appointments on the users behalf."
+
+        user_name = self.call_context.get('user_name', 'the user')
+        appointment_type = self.call_context.get('appointment_type', 'an appointment')
+        preferred_times = self.call_context.get('preferred_times', [])
+        user_phone = self.call_context.get('user_phone', '')
+        additional_details = self.call_context.get('additional_details', '')
+
+        time_prefs = ""
+        if preferred_times:
+            time_prefs = f"Preferred times: {', '.join(preferred_times)}. "
+
+        prompt = f"""You are a professional AI assistant calling on behalf of the user whose name is {user_name} to book a {appointment_type}. Todays date is {datetime.now().strftime("%A, %B %d, %Y")}.
+
+    Introduction message:
+    - Hello, I am {user_name}'s AI assistant calling to schedule a {appointment_type}. The available times are: {time_prefs}
+
+    Your role:
+    - Your only goal is to book the appointment or suggest that you'll call them back if nothing is available.
+    - Have your responses be very concise, and to the point.
+    - If you are unclear about any suggestions, inform them that you will get back to {user_name} and call back.
+    - Do not repeat yourself.
+
+    Additional Details:
+    - {additional_details}
+    - {user_phone}
+
+    Available Tools:
+    - terminate_call: Use this TOOL to end the call
+    - THESE ARE AI TOOLS. USE THEM, DON'T ANNOUNCE SAY THEM
+
+    CRITICAL:
+    - You MUST USE the terminate_call tool to ensure success - this is the only way to end calls.
+    - Once you have completed your task (either booked the appointment or determined you need to call back), say your full farewell message and immediately use terminate_call after you're done speaking. Do not give them a chance to respond.
+    - You MUST always be the one to terminate the call.
+    """
+
+        return prompt
