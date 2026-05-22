@@ -9,7 +9,7 @@ from twilio.twiml.voice_response import VoiceResponse
 from twilio_openai_handler import TwilioRealtimeServer
 
 load_dotenv()
-#Initializr FastAPI app and server
+#Initialize FastAPI app and server
 app = FastAPI()
 server = TwilioRealtimeServer()
 
@@ -59,7 +59,6 @@ async def handle_voice_webhook():
 async def handle_recording_webhook(request: Request):
     form_data = await request.form() # Twilio sends recording callbacks as .form() data, not JSON. So instead of request.json() we use request.form().
     recording_url = form_data.get('RecordingUrl') # we extract the fields we need. Twilio sends a bunch of fields
-    call_sid = form_data.get('CallSid') # these three are the ones we care about: the URL to download the audio, the call ID, and the recording ID.
     recording_sid = form_data.get('RecordingSid')
     recording_duration = form_data.get('RecordingDuration')
 
@@ -67,7 +66,7 @@ async def handle_recording_webhook(request: Request):
     print(f"🔗 Recording URL: {recording_url}")
     print(f"⏱️  Duration: {recording_duration} seconds")
     
-    await server.transcribe_recording(recording_url, call_sid, recording_sid)
+    await server.transcribe_recording(recording_url, recording_sid)
 
     return {"status": "received"}
 

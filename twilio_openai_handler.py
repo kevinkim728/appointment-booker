@@ -63,7 +63,6 @@ class TwilioRealtimeServer:
 
         elif event == 'media':
             # continuous audio chunks from Twilio — forward to OpenAI
-            print("🎤 Media pipeline established - audio flowing from Twilio")
             audio_payload = data.get('media', {}).get('payload', '')  # safely navigate nested dict, default to empty string
             if audio_payload and self.openai_ws:
                 await self.send_audio_to_openai(audio_payload)
@@ -243,18 +242,68 @@ class TwilioRealtimeServer:
     async def terminate_call(self, call_sid: str, reason: str = "completed"):
       """Terminate an active call"""
       try:
-          self.twilio_client.calls(call_sid).update(status='completed')
-          print(f"📞 Call terminated: {call_sid} - Reason: {reason}")
+          self.twilio_client.calls(call_sid).update(status='completed') # Updates the Twilio call to be 'completed'
+          print(f"📞 Call terminated: {call_sid} - Reason: {reason}") 
           await asyncio.sleep(2)
 
+          #If the openai_ws exists, then close it then change it to None
           if self.openai_ws:
               await self.openai_ws.close()
               self.openai_ws = None
 
-          self.twilio_connections.clear()
+          self.twilio_connections.clear() # CLear twilio_connections
 
           return {"success": True, "call_sid": call_sid, "reason": reason}
 
       except Exception as e:
           print(f"❌ Failed to terminate call {call_sid}: {e}")
           return {"success": False, "error": str(e)}
+
+
+    async def transcribe_recording(self, recording_url: str, recording_sid: str):
+      """Download recording from Twilio and transcribe using Whisper"""
+      try:
+          print(f"🎯 Starting download and transcription for recording: {recording_sid}")
+
+          os.makedirs("recordings_and_transcripts", exist_ok=True)
+
+          appointment_type = self.call_context.get('appointment_type', 'appointment') if self.call_context else 'appointment'
+          clean_appointment_type = appointment_type.replace(' ', '_').replace('/', '_')
+
+          auth = (os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
+          response = requests.get(recording_url + '.wav', auth=auth)
+
+          if response.status_code == 200: # if the get request was successful
+              recording_filename = f"recordings_and_transcripts/{datetime.now().strftime('%m-%d_%H-%M')}_{clean_appointment_type}.wav" # creates the file name for the .wav
+              
+              # Creates the file
+              with open(recording_filename, 'wb') as f:
+                  f.write(response.content) # writes response content which is the wav file to the file
+              print(f"💾 Recording saved: {recording_filename}")
+
+              if not hasattr(self, 'whisper_model'): # Checks if self aka server has the attribute 'whisper_model'
+                  print("🔄 Loading Whisper model...") 
+                  self.whisper_model = whisper.load_model("base.en") # if it doesn't then load up the model
+
+              print("🎤 Starting transcription...")
+              result = self.whisper_model.transcribe(recording_filename) # transcribes the .wav file
+              print("✅ Transcription completed")
+
+              timestamped_lines = []
+              for segment in result["segments"]: # One segment is roughly the beginning and end of a sentence
+                  start = segment["start"]
+                  end = segment["end"]
+                  text = segment["text"].strip() # cleans up any whitespace
+                  timestamped_lines.append(f"[{start:.1f}s - {end:.1f}s]: {text}") # Adds a start and end time stamp to the segment and appends it to the list
+
+              transcript_filename = f"recordings_and_transcripts/{datetime.now().strftime('%m-%d_%H-%M')}_{clean_appointment_type}.txt" # Creates the file name for the transcript
+              with open(transcript_filename, 'w') as f:
+                  f.write('\n'.join(timestamped_lines))
+              print(f"📝 Transcript saved: {transcript_filename}")
+
+          else:
+              print(f"❌ Failed to download recording: {response.status_code}")
+              return None
+
+      except Exception as e:
+          print(f"❌ Download and transcription failed: {e}")
