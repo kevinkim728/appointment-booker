@@ -62,6 +62,7 @@ class TwilioRealtimeServer:
             await self.connect_to_openai() # Initializes the OpenAI websocket
             self.twilio_connections[data.get('streamSid')] = twilio_ws # Stores the key streamSid and value twilio_ws(WebSocket object) into twilio_connections dict
             self.call_start_time = datetime.now() # record when the stream opened so we can skip the Twilio trial message
+            asyncio.create_task(self.silence_watchdog()) # start the 10-minute hard cap timer
             print(f'StreamSid stored:{data.get("streamSid")}')
 
         elif event == 'media':
@@ -122,21 +123,22 @@ class TwilioRealtimeServer:
                         }
                     },
                     "tools": [
-                        {
-                            "type": "function",
-                            "name": "terminate_call",
-                            "description": "End the phone call",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "reason": {
-                                        "type": "string",
-                                        "description": "Reason for ending the call (e.g., 'appointment booked at 7pm', 'no availability', 'task complete')"
-                                    }
-                                },
-                                "required": ["reason"]
-                            }
-                        }
+                        # terminate_call disabled — call end is handled server-side via silence_watchdog
+                        # {
+                        #     "type": "function",
+                        #     "name": "terminate_call",
+                        #     "description": "End the phone call",
+                        #     "parameters": {
+                        #         "type": "object",
+                        #         "properties": {
+                        #             "reason": {
+                        #                 "type": "string",
+                        #                 "description": "Reason for ending the call (e.g., 'appointment booked at 7pm', 'no availability', 'task complete')"
+                        #             }
+                        #         },
+                        #         "required": ["reason"]
+                        #     }
+                        # }
                     ]
                 }
             }
@@ -184,6 +186,12 @@ Follow these phases in order:
 - Example: "Hi, I'm calling on behalf of {user_name} to book a {appointment_type} for {date}. Do you have availability at {time_prefs}?"
 - Exit criteria: business has responded to your greeting
 
+**Handling Pauses**
+- Long silences are normal on booking calls — the business may be checking a calendar or system
+- If you get a turn after a long pause and the conversation is still in progress, wait silently rather than filling the gap
+- Only speak if the silence has been unusually long, and keep it minimal: "I'm still here whenever you're ready"
+- Never interpret silence as a "no" or a signal to move the conversation forward
+
 **Phase 2 — Confirm Availability**
 - If available at a preferred time: confirm which time and move to Phase 3
 - If not available: ask if any other times work, if still no — move to Phase 4
@@ -198,15 +206,9 @@ Follow these phases in order:
 - Exit criteria: business has confirmed all details and the booking is complete
 
 **Phase 4 — Farewell & End Call**
-- Say a natural farewell before ending
-- Example: "Thank you so much, have a great day!" / "Appreciate your help, goodbye!"
-- Immediately use terminate_call after your farewell
-
-## Tools
-- terminate_call: Ends the call. ONLY use after completing Phase 4.
-- Say your farewell out loud FIRST, then call terminate_call — never silently hang up.
-- NEVER call terminate_call before the booking is fully confirmed or clearly not possible.
-- Preamble before terminating: "Thanks so much for your help." or similar — then call the tool.
+- Thank the business and let them know they can hang up
+- Example: "We're all set! Go ahead and hang up whenever you're ready." / "Thanks so much for your help, feel free to hang up!"
+- Do NOT call any tools — wait for the business to end the call
 """
 
         return prompt
@@ -275,6 +277,13 @@ Follow these phases in order:
                   del self.twilio_connections[stream_sid]
 
     
+    async def silence_watchdog(self):
+        """Terminate the call after 10 minutes regardless of state"""
+        await asyncio.sleep(600)
+        if self.openai_ws:
+            print("⏱️ Max call duration reached — terminating")
+            await self.terminate_call(self.current_call_sid, "max_duration")
+
     async def terminate_call(self, call_sid: str, reason: str = "completed"):
       """Terminate an active call"""
       try:
