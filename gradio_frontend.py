@@ -21,7 +21,7 @@ def make_appointment_call(user_name, appointment_type, preferred_times, user_pho
 
     try:
         # Make request to your FastAPI backend
-        response = requests.post("http://localhost:8000/make-call", json=payload)
+        response = requests.post("http://localhost:8000/make-call", json=payload) # response is the result of the /make-call endpoint.
 
         if response.status_code == 200:
             result = response.json()
@@ -31,3 +31,63 @@ def make_appointment_call(user_name, appointment_type, preferred_times, user_pho
 
     except Exception as e:
         return f"❌ Connection error: {str(e)}\n\nMake sure your FastAPI server is running on http://localhost:8000"
+
+# Create Gradio interface
+with gr.Blocks(title="AI Appointment Booker") as app:
+    gr.Markdown("# 🤖 AI Appointment Booker")
+    gr.Markdown("Fill out the details below and click 'Make Call' to have the AI assistant book your appointment.")
+
+    with gr.Row():
+        with gr.Column():
+            user_name = gr.Textbox(
+                label="Your Name",
+                placeholder="Enter your name"
+            )
+
+            appointment_type = gr.Textbox(
+                label="Appointment Type",
+                placeholder="e.g., haircut, doctor appointment, restaurant reservation"
+            )
+
+            preferred_times = gr.Textbox(
+                label="Preferred Times",
+                placeholder="Enter times separated by commas"
+            )
+
+        with gr.Column():
+            user_phone = gr.Textbox(
+                label="Your Phone Number",
+                placeholder="e.g 123"
+            )
+
+            additional_details = gr.Textbox(
+                label="Additional Details",
+                placeholder="Any special requests or details (eg. Party of 2)"
+            )
+
+            business_phone = gr.Textbox(
+                label="Business Phone Number",
+                placeholder="Phone number to call"
+            )
+
+    make_call_btn = gr.Button("📞 Make Call", variant="primary", size="lg")
+
+    result_output = gr.Textbox(
+        label="Call Result",
+        lines=5,
+        interactive=False,
+        placeholder="Call results will appear here..."
+    )
+
+    # Connect the button to the function
+    make_call_btn.click(
+        fn=make_appointment_call,
+        inputs=[user_name, appointment_type, preferred_times, user_phone, additional_details, business_phone],
+        outputs=result_output
+    )
+
+    gr.Markdown("---")
+    gr.Markdown("💡 **Tip:** Make sure your FastAPI server is running before making calls!")
+
+if __name__ == "__main__":
+    app.launch(server_name="0.0.0.0", server_port=8001, share=False)
