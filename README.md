@@ -2,6 +2,10 @@
 
 An AI agent that makes outbound phone calls on your behalf to book appointments. You fill in the details, it calls the business, handles the conversation, and lets you know when it's done.
 
+## Demo
+
+[Watch the live demo](https://drive.google.com/file/d/1bJxD-qT02QcMbhTA8LbI57c_a8N98Ao8/view?usp=sharing) — a full simulated run with the agent booking an appointment at a fictional business.
+
 ## How it works
 
 1. You submit appointment details through a Gradio UI
