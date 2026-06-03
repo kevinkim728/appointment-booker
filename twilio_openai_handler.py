@@ -39,6 +39,7 @@ class TwilioRealtimeServer:
 
             self.current_call_sid = call.sid       # save the call ID so we can hang up later
             print(f"✅ Call initiated. Call SID: {self.current_call_sid}")
+            await self.connect_to_openai()         # pre-connect while the phone is still ringing
             return {
                 "success": True, 
                 "call_sid": self.current_call_sid, 
@@ -57,17 +58,17 @@ class TwilioRealtimeServer:
         event = data.get('event') # data['event'] includes a start, media, and stop
 
         if event == 'start':
-            # stream just opened — connect to OpenAI and register this WebSocket so we can send audio back
-            await self.connect_to_openai() # Initializes the OpenAI websocket
-            self.twilio_connections[data.get('streamSid')] = twilio_ws # Stores the key streamSid and value twilio_ws(WebSocket object) into twilio_connections dict
-            self.call_start_time = datetime.now() # record when the stream opened so we can skip the Twilio trial message
-            asyncio.create_task(self.silence_watchdog()) # start the 10-minute hard cap timer
+            if not self.openai_ws:
+                await self.connect_to_openai()         # fallback if pre-connect didn't happen
+            self.twilio_connections[data.get('streamSid')] = twilio_ws
+            self.call_start_time = datetime.now()
+            asyncio.create_task(self.silence_watchdog())
 
         elif event == 'media':
             # continuous audio chunks from Twilio — forward to OpenAI
             audio_payload = data.get('media', {}).get('payload', '')  # safely navigate nested dict, default to empty string
             elapsed = (datetime.now() - self.call_start_time).seconds if self.call_start_time else 0
-            if audio_payload and self.openai_ws and elapsed >= 4:
+            if audio_payload and self.openai_ws and elapsed >= 2:
                 await self.send_audio_to_openai(audio_payload)
 
         elif event == 'stop':
@@ -111,12 +112,12 @@ class TwilioRealtimeServer:
                             },
                             "turn_detection": {
                                 "type": "semantic_vad",        # uses a model to detect when the user is truly done speaking
-                                "eagerness": "low"             # waits up to 8s — gives host time to check availability without AI interrupting
+                                "eagerness": "auto"             # waits up to 8s — gives host time to check availability without AI interrupting
                             }
                         },
                         "output": {
                             "format": {"type": "audio/pcmu"},  # G.711 μ-law — matches Twilio's format so no conversion needed
-                            "voice": "alloy",
+                            "voice": "marin",
                             "speed": 1.0
                         }
                     },
